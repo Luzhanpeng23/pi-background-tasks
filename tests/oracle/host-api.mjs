@@ -577,5 +577,5 @@ try {
 console.log(
   process.argv[2] === "--fixtures-only"
     ? `Host fixtures: ${passed}/4 groups passed (not host API acceptance)`
-    : `Host API independent acceptance: ${passed}/12 groups passed`,
+    : `Host API independent acceptance: ${passed}/11 groups passed`,
 );
