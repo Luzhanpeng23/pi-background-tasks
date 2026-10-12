@@ -192,7 +192,7 @@ expect {
   timeout { puts "FUSION_LAUNCH_TIMEOUT"; exit 41 }
 }
 expect {
-  -re "\\[bg completed\\].*fusion reason" {}
+  -re {\\[bg completed\\].*fusion reason} {}
   timeout { puts "FUSION_TERMINAL_TIMEOUT"; exit 42 }
 }
 `,
