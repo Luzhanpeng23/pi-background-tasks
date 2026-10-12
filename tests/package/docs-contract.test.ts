@@ -107,7 +107,28 @@ void describe('docs package integration contract', () => {
     const always = new Set(
       surfaces.filter((surface) => surface.availability === 'always').map((surface) => surface.id),
     );
-    assert.equal(always.size, 15);
+    assert.deepEqual(
+      [...always].sort(),
+      [
+        'command:bg',
+        'command:bg-clear',
+        'command:bg-tasks',
+        'command:bg-update',
+        'command:jobs',
+        'command:kill',
+        'command:logs',
+        'command:tasks',
+        'eventbus:background-task-host-v1',
+        'eventbus:background-task-v1',
+        'renderer:background-task-notification',
+        'shortcut:ctrl+alt+c',
+        'tool:bg_kill',
+        'tool:bg_logs',
+        'tool:bg_run',
+        'tool:bg_status',
+      ].sort(),
+    );
+    assert.equal(always.size, 16);
     const byFeature = new Map<string, ReadonlySet<string>>([
       ['delegate', new Set(['tool:bg_delegate'])],
       [

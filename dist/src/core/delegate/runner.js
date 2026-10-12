@@ -223,7 +223,7 @@ export async function evaluateDelegateTerminal(input) {
     }
     return evaluation;
 }
-async function adjudicateDelegateTerminal(input) {
+export async function adjudicateDelegateTerminal(input) {
     const resultPath = join(input.artifactDirAbs, 'result.json');
     const terminalPath = join(input.artifactDirAbs, 'child-terminal.json');
     if (!existsSync(resultPath)) {

@@ -2283,6 +2283,57 @@ function extractEventBus(ts, root, cache) {
   };
 }
 
+function extractHostEventBus(ts, root, cache) {
+  const rel = 'src/core/host-protocol.ts';
+  const constants = new Map(exportedConstants(ts, root, rel, cache).map((x) => [x.name, x]));
+  const required = [
+    'HOST_REQUEST_CHANNEL',
+    'HOST_RESPONSE_CHANNEL',
+    'HOST_CHANGED_CHANNEL',
+    'HOST_REQUEST_SCHEMA',
+    'HOST_RESPONSE_SCHEMA',
+    'HOST_CHANGED_SCHEMA',
+    'HOST_CAPABILITIES',
+  ];
+  for (const key of required) if (!constants.has(key)) throw new DocsGateError(`host EventBus extraction missing ${key}`);
+  const info = moduleInfo(ts, root, rel, cache);
+  const ops = [];
+  const visit = (node) => {
+    if (ts.isTypeAliasDeclaration(node) && node.name.text === 'BackgroundTaskHostOperation' && ts.isUnionTypeNode(node.type)) {
+      for (const type of node.type.types) {
+        if (!ts.isLiteralTypeNode(type) || !ts.isStringLiteral(type.literal)) throw new DocsGateError('BackgroundTaskHostOperation contains a non-string member');
+        ops.push(type.literal.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(info.sf);
+  if (ops.length === 0) throw new DocsGateError('BackgroundTaskHostOperation union was not extracted');
+  const capabilities = constants.get('HOST_CAPABILITIES').value;
+  if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities) || !Array.isArray(capabilities.operations)) {
+    throw new DocsGateError('HOST_CAPABILITIES must be a literal object with an operations array');
+  }
+  if (JSON.stringify([...capabilities.operations].sort()) !== JSON.stringify([...ops].sort())) {
+    throw new DocsGateError('HOST_CAPABILITIES.operations drifted from BackgroundTaskHostOperation');
+  }
+  return {
+    id: 'background-task-host-v1',
+    source: rel,
+    channels: {
+      request: constants.get('HOST_REQUEST_CHANNEL').value,
+      response: constants.get('HOST_RESPONSE_CHANNEL').value,
+      changed: constants.get('HOST_CHANGED_CHANNEL').value,
+    },
+    schemas: {
+      request: constants.get('HOST_REQUEST_SCHEMA').value,
+      response: constants.get('HOST_RESPONSE_SCHEMA').value,
+      changed: constants.get('HOST_CHANGED_SCHEMA').value,
+    },
+    operations: ops.sort(),
+    capabilities,
+  };
+}
+
 function extractFusionWorkflows(ts, root, cache) {
   const rel = 'src/core/fusion/workflows.ts';
   const names = ['FUSION_REASON_WORKFLOW', 'FUSION_INVESTIGATE_WORKFLOW', 'FUSION_RESEARCH_WORKFLOW', 'FUSION_VALIDATE_WORKFLOW'];
@@ -2401,9 +2452,11 @@ export function buildCodeFacts(options = {}) {
     ),
   }));
   const eventBus = extractEventBus(ts, root, cache);
+  const hostEventBus = extractHostEventBus(ts, root, cache);
   const workflows = extractFusionWorkflows(ts, root, cache);
   const synthetic = [
     { kind: 'eventbus', name: eventBus.id, id: `eventbus:${eventBus.id}`, source: eventBus.source, channels: eventBus.channels, operations: eventBus.operations, availability: ALWAYS_AVAILABLE, default_available: true },
+    { kind: 'eventbus', name: hostEventBus.id, id: `eventbus:${hostEventBus.id}`, source: hostEventBus.source, channels: hostEventBus.channels, operations: hostEventBus.operations, availability: ALWAYS_AVAILABLE, default_available: true },
     ...workflows.map((workflow) => ({ kind: 'workflow', name: workflow.id, id: `workflow:${workflow.id}`, source: workflow.source, toolName: workflow.toolName, contextKind: workflow.contextKind, availability: 'feature:fusion', default_available: isDefaultAvailability('feature:fusion', configurationVariants) })),
   ];
   const allSurfaces = uniqueRegistrations([...registrations, ...synthetic]);
@@ -2450,6 +2503,7 @@ export function buildCodeFacts(options = {}) {
     shortcut_contracts: registrations.filter((r) => r.kind === 'shortcut').map((r) => sortDeep(r)).sort((a, b) => a.name.localeCompare(b.name)),
     renderer_contracts: registrations.filter((r) => r.kind === 'renderer').map((r) => sortDeep(r)).sort((a, b) => a.name.localeCompare(b.name)),
     event_bus: eventBus,
+    host_event_bus: hostEventBus,
     fusion_workflows: workflows,
     status_vocabularies: extractStatusVocabularies(ts, root, cache),
     schema_ids: [...schemaIds.values()].sort((a, b) => a.id.localeCompare(b.id)),
@@ -3195,6 +3249,18 @@ function buildEventBusRegion(codeFacts) {
   ])}\n\nOperations: ${codeFacts.event_bus.operations.map((op) => `\`${op}\``).join(', ')}.\n\n${codeBlockJson(codeFacts.event_bus.capabilities)}`;
 }
 
+function buildHostEventBusRegion(codeFacts) {
+  const surface = codeFacts.public_surfaces.eventbus.find(
+    (item) => item.id === 'eventbus:background-task-host-v1',
+  );
+  const bus = codeFacts.host_event_bus;
+  return `Availability: \`${surface?.availability ?? ALWAYS_AVAILABLE}\`; available by default: **${surface?.default_available ? 'yes' : 'no'}**.\n\n${mdTable(['Channel purpose', 'Channel', 'Schema'], [
+    ['Request', `\`${bus.channels.request}\``, `\`${bus.schemas.request}\``],
+    ['Response', `\`${bus.channels.response}\``, `\`${bus.schemas.response}\``],
+    ['Changed', `\`${bus.channels.changed}\``, `\`${bus.schemas.changed}\``],
+  ])}\n\nOperations: ${bus.operations.map((op) => `\`${op}\``).join(', ')}.\n\n${codeBlockJson(bus.capabilities)}`;
+}
+
 function buildFusionWorkflowRegion(codeFacts) {
   return mdTable(
     ['Workflow', 'Availability', 'Default', 'Tool', 'Context', 'Candidate capability', 'Candidate tools', 'Evaluator/merger tools', 'Provenance'],
@@ -3260,6 +3326,7 @@ function applyGeneratedRegionsToDoc(doc, codeFacts, coverage, docsModel, attesta
     }
     if (doc.rel === 'docs/reference/shortcuts-and-dock.md') body = replaceOrInsertRegion(body, 'shortcut-contracts', buildShortcutRegion(codeFacts));
     if (doc.rel === 'docs/api/eventbus-v1.md') body = replaceOrInsertRegion(body, 'eventbus-contract', buildEventBusRegion(codeFacts));
+    if (doc.rel === 'docs/api/eventbus-host-v1.md') body = replaceOrInsertRegion(body, 'eventbus-host-contract', buildHostEventBusRegion(codeFacts));
     if (doc.rel === 'docs/subsystems/fusion.md') body = replaceOrInsertRegion(body, 'fusion-workflows', buildFusionWorkflowRegion(codeFacts));
     if (doc.rel === 'docs/reference/runtime-contracts.md') body = replaceOrInsertRegion(body, 'runtime-contracts', buildRuntimeRegion(codeFacts));
   }
@@ -3298,13 +3365,29 @@ function renderAll(root, codeFacts, docsModel, coverage, attestations) {
 export async function generate(options = {}) {
   const root = resolve(options.packageRoot ?? PACKAGE_ROOT);
   const codeFacts = buildCodeFacts({ packageRoot: root });
-  const model = loadDocsModel({ packageRoot: root });
-  const coverage = assertCoverage(codeFacts, model);
-  const attestations = verifyAttestations(root, model, readAttestations(root), { strict: false });
-  const rendered = renderAll(root, codeFacts, model, coverage, attestations);
-  for (const [rel, text] of Object.entries(rendered.texts)) {
-    await mkdir(dirname(packagePath(root, rel)), { recursive: true });
-    await writeFile(packagePath(root, rel), text);
+  // A newly inserted generated region changes the authored-body bytes that
+  // attestation state is computed from, so one render is not always a fixed
+  // point. Re-render from the written files until nothing changes; failing to
+  // converge is a loud generator defect, never a silently stale output.
+  const GENERATE_MAX_PASSES = 3;
+  let rendered;
+  let converged = false;
+  for (let pass = 0; pass < GENERATE_MAX_PASSES && !converged; pass += 1) {
+    const model = loadDocsModel({ packageRoot: root });
+    const coverage = assertCoverage(codeFacts, model);
+    const attestations = verifyAttestations(root, model, readAttestations(root), { strict: false });
+    rendered = renderAll(root, codeFacts, model, coverage, attestations);
+    converged = true;
+    for (const [rel, text] of Object.entries(rendered.texts)) {
+      const abs = packagePath(root, rel);
+      if (existsSync(abs) && readFileSync(abs, 'utf8') === text) continue;
+      converged = false;
+      await mkdir(dirname(abs), { recursive: true });
+      await writeFile(abs, text);
+    }
+  }
+  if (!converged) {
+    throw new DocsGateError(`docs generation did not reach a fixed point within ${String(GENERATE_MAX_PASSES)} passes`);
   }
   const finalModel = loadDocsModel({ packageRoot: root });
   verifyLinksAndReachability(root, finalModel);

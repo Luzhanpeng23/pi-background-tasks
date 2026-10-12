@@ -9,6 +9,7 @@ import { BackgroundTaskRegistry } from './core/registry.js';
 import { getProcessReloadShellOwnerV1, makeReloadShellIdentity, } from './core/reload-shell-owner.js';
 import { createShellPolicyGuidanceHandler, initializeShellPolicy } from './core/shell-policy.js';
 import { installBackgroundTaskExtensionApi, } from './core/extension-api.js';
+import { installBackgroundTaskHostApi, } from './core/host-api.js';
 import { dockShortcutFooterHint, parseBackgroundTasksConfig } from './core/config.js';
 import { LazyModule, SynchronousActivationCloseFence } from './core/lazy-module.js';
 /**
@@ -123,6 +124,7 @@ export default async function backgroundTasksExtension(pi) {
     let shutdownReason = 'shutdown';
     const activationCloseFence = new SynchronousActivationCloseFence();
     const taskManagerLoader = new LazyModule('background-task-manager', () => import('./ui/background-tasks-manager.js'));
+    const hostResultLoader = new LazyModule('host-result-reader', () => import('./core/host-results.js'));
     const registryContext = (ctx) => ({
         cwd: ctx.cwd,
         sessionId: ctx.sessionManager.getSessionId(),
@@ -132,6 +134,7 @@ export default async function backgroundTasksExtension(pi) {
     const registry = new BackgroundTaskRegistry({
         onChange: () => {
             updateUi();
+            hostService.invalidate();
         },
         sendCompletionNotification: (message, options) => {
             pi.sendMessage(message, options);
@@ -147,6 +150,19 @@ export default async function backgroundTasksExtension(pi) {
         registry,
         getContext: () => currentRegistryCtx,
         isShuttingDown: () => registry.isShuttingDown(),
+    });
+    const hostService = installBackgroundTaskHostApi({
+        events: pi.events,
+        registry,
+        getContext: () => currentRegistryCtx,
+        isSeen: (taskId) => seenTaskIds.has(taskId),
+        markSeen: (taskIds) => {
+            for (const taskId of taskIds)
+                seenTaskIds.add(taskId);
+            updateUi();
+            hostService.invalidate();
+        },
+        readResult: (task) => hostResultLoader.run((runtime) => runtime.readHostTaskResult(task)),
     });
     const beginSessionShutdown = (reason) => {
         let handoffError;
@@ -178,6 +194,7 @@ export default async function backgroundTasksExtension(pi) {
             }
             registry.setShuttingDown(true);
             eventService.close();
+            hostService.close();
         }
         // Teardown remains active on repeated calls so even a handle assigned by a
         // racing continuation is still disposed rather than hidden by idempotence.
@@ -200,6 +217,9 @@ export default async function backgroundTasksExtension(pi) {
     activationCloseFence.add(() => {
         taskManagerLoader.close('session shutdown');
     });
+    activationCloseFence.add(() => {
+        hostResultLoader.close('session shutdown');
+    });
     pi.on('session_shutdown', (event) => {
         shutdownReason = event.reason;
         activationCloseFence.close();
@@ -219,6 +239,7 @@ export default async function backgroundTasksExtension(pi) {
             }
             currentCtx = ctx;
             currentRegistryCtx = nextRegistryCtx;
+            hostService.markReady();
             return;
         }
         const activationNonce = randomBytes(16).toString('hex');
@@ -244,6 +265,7 @@ export default async function backgroundTasksExtension(pi) {
             activationIdentity = identity;
             currentCtx = ctx;
             currentRegistryCtx = nextRegistryCtx;
+            hostService.markReady();
         }
         catch (error) {
             registry.abortReloadActivation(claim);
@@ -308,6 +330,8 @@ export default async function backgroundTasksExtension(pi) {
         for (const task of unseen)
             seenTaskIds.add(task.id);
         updateUi(ctx);
+        if (unseen.length > 0)
+            hostService.invalidate();
         return unseen.length;
     }
     function notifyClearFinishedNotices(ctx) {
@@ -419,11 +443,13 @@ export default async function backgroundTasksExtension(pi) {
                     markSeen: (taskId) => {
                         seenTaskIds.add(taskId);
                         updateUi(ctx);
+                        hostService.invalidate();
                     },
                     markFinishedSeen: (taskIds) => {
                         for (const taskId of taskIds)
                             seenTaskIds.add(taskId);
                         updateUi(ctx);
+                        hostService.invalidate();
                     },
                     isSeen: (taskId) => seenTaskIds.has(taskId),
                 };
@@ -506,6 +532,7 @@ export default async function backgroundTasksExtension(pi) {
         if (disposed)
             return;
         updateUi(ctx);
+        hostService.markReady();
         if (disposed)
             return;
         if (statusInterval !== undefined)

@@ -36,10 +36,12 @@ function mustThrow(name, fn, pattern) {
 const codeFacts = buildCodeFacts();
 const docsModel = loadDocsModel();
 
-assert.equal(docsModel.docs.length, 42, 'all docs/**/*.md are governed');
-assert.equal(codeFacts.public_surface_ids.length, 32, 'all command/tool/shortcut/renderer/EventBus/workflow surfaces are extracted');
-assert.equal(codeFacts.default_public_surface_ids.length, 31, 'alternate dock shortcut is the only non-default surface');
+assert.equal(docsModel.docs.length, 43, 'all docs/**/*.md are governed');
+assert.equal(codeFacts.public_surface_ids.length, 33, 'all command/tool/shortcut/renderer/EventBus/workflow surfaces are extracted');
+assert.equal(codeFacts.default_public_surface_ids.length, 32, 'alternate dock shortcut is the only non-default surface');
 assert.ok(codeFacts.public_surface_ids.includes('eventbus:background-task-v1'));
+assert.ok(codeFacts.public_surface_ids.includes('eventbus:background-task-host-v1'));
+assert.ok(codeFacts.default_public_surface_ids.includes('eventbus:background-task-host-v1'));
 assert.ok(codeFacts.public_surface_ids.includes('workflow:research'));
 const surfaceById = new Map(
   Object.values(codeFacts.public_surfaces).flat().map((surface) => [surface.id, surface]),
@@ -55,6 +57,8 @@ assert.equal(surfaceById.get('command:claude-cache').availability, 'feature:attr
 assert.equal(surfaceById.get('shortcut:shift+down').availability, 'dock:shift+down');
 assert.equal(surfaceById.get('shortcut:ctrl+alt+b').availability, 'dock:ctrl+alt+b');
 assert.equal(surfaceById.get('shortcut:ctrl+alt+b').default_available, false);
+assert.equal(surfaceById.get('eventbus:background-task-host-v1').availability, 'always');
+assert.equal(surfaceById.get('eventbus:background-task-host-v1').default_available, true);
 assert.equal(docsModel.docs.find((doc) => doc.doc_id === 'INDEX').frontmatter.covers_surfaces.length, 0, 'INDEX must not own public surfaces');
 assert.equal(docsModel.docs.find((doc) => doc.doc_id === 'read-before-edit').frontmatter.covers_sources.length, 0, 'read-before-edit must not own sources');
 const envNames = new Set(codeFacts.environment_variables.map((entry) => entry.name));
