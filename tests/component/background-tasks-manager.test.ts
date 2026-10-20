@@ -98,6 +98,8 @@ function task(overrides: Partial<BackgroundTaskForUi> = {}): BackgroundTaskForUi
 function manager(
   options: Partial<ConstructorParameters<typeof BackgroundTasksManager>[3]> = {},
   tasks: BackgroundTaskForUi[] = [task()],
+  // 34 行终端对应一个 12 行的日志窗口（普通任务 5 行元数据）
+  rows = 34,
 ) {
   let closed = false;
   let renders = 0;
@@ -109,6 +111,7 @@ function manager(
       requestRender: () => {
         renders++;
       },
+      terminal: { rows },
     },
     theme,
     () => {
@@ -311,7 +314,9 @@ void describe('BackgroundTasksManager component', () => {
         h.instance.handleInput('\r');
         await new Promise((resolve) => setTimeout(resolve, 20));
         text = stripAnsi(h.instance.render(120).join('\n'));
-        assert.match(text, /Model: not reported by this background task/);
+        // 普通 shell 任务不显示空的遥测占位行
+        assert.match(text, /bg: No Context Task/);
+        assert.doesNotMatch(text, /Model:|Context:|Tokens:|Tools:|not reported/);
       } finally {
         h.instance.dispose();
       }
@@ -400,6 +405,39 @@ void describe('BackgroundTasksManager component', () => {
         assert.match(text, /LINE-040/);
       } finally {
         h.instance.dispose();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  void it('sizes the output window to the terminal so the footer is never cut off', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'pi-bg-adaptive-'));
+    try {
+      const outputAbsPath = join(dir, 'task.output');
+      const fileLines = Array.from(
+        { length: 80 },
+        (_, i) => `LINE-${String(i + 1).padStart(3, '0')}`,
+      );
+      await writeFile(outputAbsPath, `${fileLines.join('\n')}\n`, 'utf8');
+      const visibleLineCount = (lines: string[]) =>
+        lines.filter((line) => /LINE-\d{3}/.test(stripAnsi(line))).length;
+
+      for (const rows of [20, 34, 60]) {
+        const h = manager({ initialTaskId: 'b12345678' }, [task({ outputAbsPath })], rows);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          const lines = h.instance.render(100);
+          // 整个弹窗必须放得进 90% 的 overlay maxHeight，底栏始终是最后一行内容
+          assert.ok(lines.length <= Math.floor(rows * 0.9), `rows=${rows}`);
+          assert.match(stripAnsi(lines.at(-2) ?? ''), /x close/);
+          assert.match(stripAnsi(lines.join('\n')), /LINE-080/);
+          if (rows === 20) assert.equal(visibleLineCount(lines), 1);
+          if (rows === 34) assert.equal(visibleLineCount(lines), 12);
+          if (rows === 60) assert.equal(visibleLineCount(lines), 35);
+        } finally {
+          h.instance.dispose();
+        }
       }
     } finally {
       await rm(dir, { recursive: true, force: true });

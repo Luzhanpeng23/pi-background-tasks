@@ -643,7 +643,7 @@ export default async function backgroundTasksExtension(pi: ExtensionAPI): Promis
             anchor: 'bottom-center',
             width: '96%',
             minWidth: 64,
-            maxHeight: '60%',
+            maxHeight: '90%',
             margin: { bottom: 1, left: 1, right: 1 },
           },
         },

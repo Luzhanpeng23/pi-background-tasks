@@ -31,7 +31,9 @@ const STATUS_INTERVAL_MS = 1000;
 // gives thousands of lines of scrollback when the user pauses the live tail.
 const DETAIL_TAIL_BYTES = 128 * 1024;
 const LIST_VISIBLE_ROWS = 14;
-const DETAIL_VISIBLE_OUTPUT_LINES = 12;
+// 须与 extension.ts 中 overlay 的 maxHeight（90%）保持一致
+const DETAIL_MAX_HEIGHT_RATIO = 0.9;
+const DETAIL_MAX_OUTPUT_LINES = 35;
 const LIGHT_BLUE_BG = '\x1b[48;2;183;223;255m';
 const LIGHT_BLUE_FG = '\x1b[38;2;11;70;110m';
 const LIGHT_BLUE_BORDER = '\x1b[38;2;83;160;215m';
@@ -166,11 +168,6 @@ function formatModel(task: BgTask): string {
   return `model ${shortModelName(task.model)}`;
 }
 
-function formatModelDetail(task: BgTask): string {
-  if (!task.model) return 'not reported by this background task';
-  return task.model;
-}
-
 function contextColor(theme: TaskManagerTheme, task: BgTask, text: string): string {
   const percent = task.contextUsage?.percent ?? 0;
   if (percent > 90) return theme.fg('error', text);
@@ -189,6 +186,11 @@ function sortTasksForUi(tasks: BgTask[]): BgTask[] {
 }
 
 export type TaskManagerResult = 'closed';
+
+/** 真实 TUI 满足该结构；terminal 可选，便于测试固定终端高度 */
+export type ManagerTui = Pick<TUI, 'requestRender'> & {
+  readonly terminal?: { readonly rows: number };
+};
 
 export interface StopAllResult {
   stopped: number;
@@ -222,12 +224,13 @@ export class BackgroundTasksManager implements Component {
   private tailError: string | undefined;
   private actionMessage: string | undefined;
   private confirmStopAllArmed = false;
+  private visibleOutputLines = 12;
   private readonly lastBytesByTask = new Map<string, number>();
   private readonly recentActivityByTask = new Map<string, { delta: number; timestamp: number }>();
   private refreshTimer: NodeJS.Timeout;
 
   constructor(
-    private readonly tui: Pick<TUI, 'requestRender'>,
+    private readonly tui: ManagerTui,
     private readonly theme: TaskManagerTheme,
     private readonly done: (result: TaskManagerResult) => void,
     private readonly options: TaskManagerOptions,
@@ -281,7 +284,7 @@ export class BackgroundTasksManager implements Component {
   }
 
   render(width: number): string[] {
-    const boxWidth = Math.max(2, Math.min(width, 118));
+    const boxWidth = Math.max(2, width);
     return this.mode === 'detail' ? this.renderDetail(boxWidth) : this.renderList(boxWidth);
   }
 
@@ -372,12 +375,25 @@ export class BackgroundTasksManager implements Component {
       this.scrollDetail(1);
       return;
     }
+    if (data === 'g' || matchesKey(data, 'home')) {
+      this.detailFollow = false;
+      this.detailScrollTop = 0;
+      this.tui.requestRender();
+      return;
+    }
+    if (data === 'G' || matchesKey(data, 'end')) {
+      this.detailFollow = true;
+      this.detailScrollTop = 0;
+      void this.refreshTail();
+      this.tui.requestRender();
+      return;
+    }
     if (matchesKey(data, 'pageUp')) {
-      this.scrollDetail(-DETAIL_VISIBLE_OUTPUT_LINES);
+      this.scrollDetail(-this.getVisibleOutputLines());
       return;
     }
     if (matchesKey(data, 'pageDown')) {
-      this.scrollDetail(DETAIL_VISIBLE_OUTPUT_LINES);
+      this.scrollDetail(this.getVisibleOutputLines());
       return;
     }
     if (data === 'r') {
@@ -510,7 +526,8 @@ export class BackgroundTasksManager implements Component {
 
   /** Scroll the detail output window. Scrolling up pauses the live tail; reaching the bottom resumes it. */
   private scrollDetail(delta: number): void {
-    const maxTop = Math.max(0, this.detailLines.length - DETAIL_VISIBLE_OUTPUT_LINES);
+    const visibleLines = this.getVisibleOutputLines();
+    const maxTop = Math.max(0, this.detailLines.length - visibleLines);
     if (maxTop === 0) return;
     if (this.detailFollow) {
       this.detailFollow = false;
@@ -689,6 +706,16 @@ export class BackgroundTasksManager implements Component {
     );
   }
 
+  /** 终端可用行数：优先取 TUI 的 terminal，其次 stdout，最后兜底 30 行 */
+  private getTerminalRows(): number {
+    const rows = this.tui.terminal?.rows ?? process.stdout.rows;
+    return typeof rows === 'number' && rows > 0 ? rows : 30;
+  }
+
+  private getVisibleOutputLines(): number {
+    return Math.max(1, this.visibleOutputLines);
+  }
+
   private renderDetail(width: number): string[] {
     const task = this.detailTask();
     if (!task) {
@@ -698,46 +725,55 @@ export class BackgroundTasksManager implements Component {
     const name = taskDisplayName(task);
     const status = statusColor(this.theme, task.status);
     const exit = formatExitCodeText(task.exitCode);
-    const body: string[] = [
+    const metaLines: string[] = [
       ` ${this.theme.fg('toolTitle', 'Name:')} ${this.theme.fg('accent', name)}`,
-      ` ${this.theme.fg('toolTitle', 'ID:')} ${this.theme.fg('accent', task.id)}`,
-      ` ${this.theme.fg('toolTitle', 'Status:')} ${status}${this.theme.fg('dim', exit)}`,
-      ` ${this.theme.fg('toolTitle', 'Runtime:')} ${taskAge(task)}${this.theme.fg('dim', formatPidText(task.pid))}`,
-      ` ${this.theme.fg('toolTitle', 'Started:')} ${formatTime(task.startTime)}${task.endTime ? this.theme.fg('dim', ` · ended ${formatTime(task.endTime)}`) : ''}`,
+      ` ${this.theme.fg('toolTitle', 'ID:')} ${this.theme.fg('accent', task.id)}  ${this.theme.fg('toolTitle', 'Status:')} ${status}${this.theme.fg('dim', exit)}`,
+      ` ${this.theme.fg('toolTitle', 'Runtime:')} ${taskAge(task)}${this.theme.fg('dim', formatPidText(task.pid))}  ${this.theme.fg('toolTitle', 'Started:')} ${formatTime(task.startTime)}${task.endTime ? this.theme.fg('dim', ` · ended ${formatTime(task.endTime)}`) : ''}`,
       ` ${this.theme.fg('toolTitle', 'Output:')} ${this.theme.fg('accent', task.outputPath)}`,
     ];
     if (task.description && compactWhitespace(task.description) !== compactWhitespace(name)) {
-      body.push(
+      metaLines.push(
         ` ${this.theme.fg('toolTitle', 'Description:')} ${truncateToWidth(task.description, width - 16)}`,
       );
     }
-    const modelDetail = formatModelDetail(task);
-    body.push(
-      ` ${this.theme.fg('toolTitle', 'Model:')} ${task.model ? this.theme.fg('accent', modelDetail) : this.theme.fg('dim', modelDetail)}`,
-    );
-    const context = formatContextDetail(task);
-    body.push(
-      ` ${this.theme.fg('toolTitle', 'Context:')} ${contextColor(this.theme, task, context)}`,
-    );
-    body.push(
-      ` ${this.theme.fg('toolTitle', 'Tokens:')} ${this.theme.fg('dim', formatTokenDetail(task))}`,
-    );
-    body.push(
-      ` ${this.theme.fg('toolTitle', 'Tools:')} ${this.theme.fg('dim', formatToolDetail(task))}`,
-    );
-    body.push(
+    if (task.model) {
+      metaLines.push(` ${this.theme.fg('toolTitle', 'Model:')} ${this.theme.fg('accent', task.model)}`);
+    }
+    if (task.contextUsage?.contextWindow) {
+      const context = formatContextDetail(task);
+      metaLines.push(` ${this.theme.fg('toolTitle', 'Context:')} ${contextColor(this.theme, task, context)}`);
+    }
+    if (task.tokenUsage && task.tokenUsage.totalTokens > 0) {
+      metaLines.push(` ${this.theme.fg('toolTitle', 'Tokens:')} ${this.theme.fg('dim', formatTokenDetail(task))}`);
+    }
+    if (task.toolUsage && (task.toolUsage.total > 0 || task.toolUsage.failed > 0)) {
+      metaLines.push(` ${this.theme.fg('toolTitle', 'Tools:')} ${this.theme.fg('dim', formatToolDetail(task))}`);
+    }
+    metaLines.push(
       ` ${this.theme.fg('toolTitle', 'Command:')} ${truncateToWidth(task.command, width - 13)}`,
     );
-    if (task.error) body.push(` ${this.theme.fg('error', `Error: ${task.error}`)}`);
+    if (task.error) metaLines.push(` ${this.theme.fg('error', `Error: ${task.error}`)}`);
+
+    // 动态计算日志区可见行数：整个弹窗须放进 overlay 的 90% maxHeight，否则底栏会被 TUI 截掉。
+    // 固定开销 = 外框/标题/底栏 7 行 + "Output tail" 标题 2 行 + 日志框上下边与状态行 3 行。
+    const heightBudget = Math.floor(this.getTerminalRows() * DETAIL_MAX_HEIGHT_RATIO) - 1;
+    const fixedLines = 12 + metaLines.length + (this.actionMessage ? 1 : 0);
+    this.visibleOutputLines = Math.max(
+      1,
+      Math.min(DETAIL_MAX_OUTPUT_LINES, heightBudget - fixedLines),
+    );
+
+    const body: string[] = [...metaLines];
     body.push('', ` ${this.theme.fg('toolTitle', 'Output tail:')}`);
     body.push(...this.renderOutputBox(width - 4));
     if (this.actionMessage) body.push(this.theme.fg('warning', ` ${this.actionMessage}`));
     const subtitle = `${task.id} · ${task.status === 'running' ? 'live tail refreshes every second' : 'final output'}`;
-    const footer = ` ${this.theme.fg('dim', '↑/↓ scroll · ← list · r refresh · k stop · R rerun · c path · x close')}`;
+    const footer = ` ${this.theme.fg('dim', '↑/↓ scroll · g/G top/end · ← list · r refresh · k stop · R rerun · c path · x close')}`;
     return this.frame(`bg: ${truncateChars(name, 64)}`, subtitle, body, footer, width);
   }
 
   private renderOutputBox(width: number): string[] {
+    const visibleLines = this.getVisibleOutputLines();
     const inner = Math.max(1, width - 2);
     const top = ` ${blueBorder(`╭${'─'.repeat(inner)}╮`)}`;
     const bottom = ` ${blueBorder(`╰${'─'.repeat(inner)}╯`)}`;
@@ -749,23 +785,24 @@ export class BackgroundTasksManager implements Component {
     } else if (this.detailLines.length === 0) {
       lines.push(row(this.theme.fg('dim', 'No output yet')));
     } else {
-      const maxTop = Math.max(0, this.detailLines.length - DETAIL_VISIBLE_OUTPUT_LINES);
+      const maxTop = Math.max(0, this.detailLines.length - visibleLines);
       const start = this.detailFollow ? maxTop : Math.min(this.detailScrollTop, maxTop);
-      const windowLines = this.detailLines.slice(start, start + DETAIL_VISIBLE_OUTPUT_LINES);
+      const windowLines = this.detailLines.slice(start, start + visibleLines);
       for (const line of windowLines) lines.push(row(this.theme.fg('toolOutput', line)));
     }
-    while (lines.length < DETAIL_VISIBLE_OUTPUT_LINES + 1) lines.push(row());
+    while (lines.length < visibleLines + 1) lines.push(row());
     lines.push(bottom);
     lines.push(` ${this.theme.fg('dim', this.outputStatusLine())}`);
     return lines;
   }
 
   private outputStatusLine(): string {
+    const visibleLines = this.getVisibleOutputLines();
     const total = this.detailLines.length;
     if (!this.detailFollow && total > 0) {
-      const maxTop = Math.max(0, total - DETAIL_VISIBLE_OUTPUT_LINES);
+      const maxTop = Math.max(0, total - visibleLines);
       const start = Math.min(this.detailScrollTop, maxTop);
-      const end = Math.min(total, start + DETAIL_VISIBLE_OUTPUT_LINES);
+      const end = Math.min(total, start + visibleLines);
       return `lines ${formatCount(start + 1)}\u2013${formatCount(end)} of ${formatCount(total)} · ↑/↓ PgUp/PgDn scroll · ↓ at bottom follows`;
     }
     const suffix = this.tailTruncated ? ` of ${formatSize(this.tailTotalBytes)}` : '';
